@@ -15,7 +15,6 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -250,34 +249,6 @@ public abstract class AbstractDelayedQueueService {
                 getQueueName(), messageId, delay, unit);
         return messageId;
     }
-
-
-    /**
-     * 批量添加延时消息
-     */
-    public List<String> addBatchDelayedMessages(List<DelayedMessage> messages, long delay, TimeUnit unit) {
-        List<String> messageIds = new ArrayList<>();
-        RBatch batch = redissonClient.createBatch();
-
-        for (DelayedMessage msgInfo : messages) {
-            String messageId = idManager.getId();
-            LocalDateTime processTime = LocalDateTime.now().plusSeconds(unit.toSeconds(delay));
-
-            // 批量保存到数据库
-            DelayedMessage message = new DelayedMessage(messageId, msgInfo.getContent(), processTime, msgInfo.getTopic());
-            message.setStatus(0);
-            delayedMessageService.save(message);
-
-            // 批量添加到延时队列
-            delayedQueue.offerAsync(messageId, delay, unit);
-            messageIds.add(messageId);
-        }
-
-        batch.execute();
-        logger.info("批量添加延时消息成功，queue: {}, count: {}", getQueueName(), messages.size());
-        return messageIds;
-    }
-
 
     /**
      * 处理消息

@@ -15,7 +15,7 @@ public class EmailDelayedQueueService extends AbstractDelayedQueueService {
     @Override
     protected void handleMessage(DelayedMessage message) throws Exception {
         // 实现邮件发送逻辑
-        System.out.println("发送邮件: " + message.getContent());
+        System.out.println("---------发送邮件---------: " + message.getContent());
         // 模拟处理时间
         Thread.sleep(100);
     }

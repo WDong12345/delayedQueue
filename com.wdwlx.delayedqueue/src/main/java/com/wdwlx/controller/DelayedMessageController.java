@@ -1,4 +1,3 @@
-// #file:F:\工作目录\java_wp\com.wdwlx.delayedqueue\src\main\java\com\wdwlx\controller\DelayedMessageController.java
 package com.wdwlx.controller;
 
 import com.wdwlx.service.NotificationDelayedQueueService;
@@ -28,10 +27,7 @@ public class DelayedMessageController {
     private TaskDelayedQueueService taskDelayedQueueService;
 
     @PostMapping("/add")
-    public String sendOrderDelayedMessage(
-            @RequestParam String content,
-            @RequestParam String topic,
-            @RequestParam String expireTimeStr) {
+    public String sendOrderDelayedMessage(@RequestParam String content, @RequestParam String topic, @RequestParam String expireTimeStr) {
 
         LocalDateTime expireTime = LocalDateTime.parse(expireTimeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         if (Objects.equals(topic, "order")) {
@@ -45,5 +41,19 @@ public class DelayedMessageController {
         }
         return "   异常";
     }
+
+    @PostMapping("/addBatch")
+    public String sendOrderDelayedMessageBatch() {
+        LocalDateTime now = LocalDateTime.now();
+        for (int i = 0; i < 200; i++) {
+            LocalDateTime expireTime = now.plusSeconds(i);
+            orderDelayedQueueService.addDelayedMessage("order" + i, expireTime, "order");
+            taskDelayedQueueService.addDelayedMessage("task" + i, expireTime, "task");
+            notificationDelayedQueueService.addDelayedMessage("notification" + i, expireTime, "notification");
+        }
+        return "";
+
+    }
+
 
 }
