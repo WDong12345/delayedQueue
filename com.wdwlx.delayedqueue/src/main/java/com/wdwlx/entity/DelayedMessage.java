@@ -15,13 +15,17 @@ public class DelayedMessage {
     private String content;
     private LocalDateTime createTime = LocalDateTime.now();
     private LocalDateTime processTime;
+    /**
+     * 过期时间
+     */
+    private LocalDateTime expireTime;
     private Integer status; // 0:未处理, 1:已处理, 2:处理中
     private String topic;
 
-    public DelayedMessage(String messageId, String content, LocalDateTime processTime, String topic) {
+    public DelayedMessage(String messageId, String content, LocalDateTime expireTime, String topic) {
         this.messageId = messageId;
         this.content = content;
-        this.processTime = processTime;
+        this.expireTime = expireTime;
         this.topic = topic;
     }
 }

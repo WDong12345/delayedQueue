@@ -10,8 +10,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 
 @RestController
 @RequestMapping("/delayed")
@@ -30,18 +31,18 @@ public class DelayedMessageController {
     public String sendOrderDelayedMessage(
             @RequestParam String content,
             @RequestParam String topic,
-            @RequestParam long delay,
-            @RequestParam TimeUnit unit) {
+            @RequestParam String expireTimeStr) {
+
+        LocalDateTime expireTime = LocalDateTime.parse(expireTimeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         if (Objects.equals(topic, "order")) {
-            return orderDelayedQueueService.addDelayedMessage(content, delay, unit, topic);
+            return orderDelayedQueueService.addDelayedMessage(content, expireTime, topic);
         }
         if (Objects.equals(topic, "task")) {
-            return taskDelayedQueueService.addDelayedMessage(content, delay, unit, topic);
+            return taskDelayedQueueService.addDelayedMessage(content, expireTime, topic);
         }
         if (Objects.equals(topic, "notification")) {
-            return notificationDelayedQueueService.addDelayedMessage(content, delay, unit, topic);
+            return notificationDelayedQueueService.addDelayedMessage(content, expireTime, topic);
         }
-
         return "   异常";
     }
 

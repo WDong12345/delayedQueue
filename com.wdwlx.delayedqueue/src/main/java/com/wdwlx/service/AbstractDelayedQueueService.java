@@ -1,16 +1,26 @@
 package com.wdwlx.service;
 
 import com.wdwlx.entity.DelayedMessage;
+import com.wdwlx.util.IdManager;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import lombok.NonNull;
 import org.redisson.api.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
-import java.util.UUID;
+import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public abstract class AbstractDelayedQueueService {
@@ -22,9 +32,33 @@ public abstract class AbstractDelayedQueueService {
     @Autowired
     private DelayedMessageService delayedMessageService;
 
+    // 注入处理线程池
+    @Autowired
+    @Qualifier("delayedQueueProcessorExecutor")
+    private ThreadPoolTaskExecutor processorExecutor;
+
+    // 注入监听线程池
+    @Autowired
+    @Qualifier("delayedQueueListenerExecutor")
+    private ScheduledExecutorService listenerExecutor;
+
+    // 锁超时配置
+    @Value("${delayed.queue.lock.wait-timeout-seconds:5}")
+    private int lockWaitTimeoutSeconds;
+
+    @Value("${delayed.queue.lock.lease-timeout-seconds:15}")
+    private int lockLeaseTimeoutSeconds;
+
+    @Autowired
+    private IdManager idManager;
+
     private RDelayedQueue<String> delayedQueue;
     private RQueue<String> queue;
     private RBlockingQueue<String> blockingQueue;
+
+    // 添加定时任务的Future引用
+    private ScheduledFuture<?> listenerTaskFuture;
+    private volatile boolean isListening = false;
 
     // 抽象方法，由子类提供队列名称
     protected abstract String getQueueName();
@@ -39,12 +73,13 @@ public abstract class AbstractDelayedQueueService {
     public void init() {
         // 初始化队列
         String queueName = getQueueName();
+        logger.info("初始化队列：{}", queueName);
         queue = redissonClient.getQueue(queueName);
         delayedQueue = redissonClient.getDelayedQueue(queue);
         blockingQueue = redissonClient.getBlockingQueue(queueName);
 
-        // 启动消息处理器
-        startMessageProcessor();
+        // 启动消息监听器
+        startMessageListener();
 
         // 恢复未处理消息
         recoverUnprocessedMessages();
@@ -56,51 +91,138 @@ public abstract class AbstractDelayedQueueService {
     }
 
     /**
-     * 启动消息处理器
+     * 启动消息监听器（使用共享监听线程池）
      */
-    private void startMessageProcessor() {
-        Thread processorThread = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    // 使用 poll 方法并设置超时时间，避免一直阻塞
-                    String messageId = blockingQueue.poll(10, TimeUnit.SECONDS);
+    private void startMessageListener() {
+        String queueName = getQueueName();
 
-                    // 如果没有获取到消息，继续下一次循环
-                    if (messageId == null) {
-                        continue;
-                    }
+        // 提交周期性任务到共享监听线程池并保存Future
+        listenerTaskFuture = listenerExecutor.scheduleWithFixedDelay(
+                this::checkQueueMessages,
+                0,
+                100, // 固定100毫秒检查间隔
+                TimeUnit.MILLISECONDS
+        );
 
-                    // 使用分布式锁防止重复处理
-                    String lockName = "delayed_queue_processor_lock_" + getQueueName() + "_" + messageId;
-                    RLock lock = redissonClient.getLock(lockName);
-                    boolean acquired = lock.tryLock(10, 30, TimeUnit.SECONDS);
+        isListening = true;
+        logger.info("注册队列监听器: {}", queueName);
+    }
 
-                    if (acquired) {
-                        try {
-                            processMessage(messageId);
-                        } finally {
-                            lock.unlock();
-                        }
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    logger.error("处理延时消息异常, queue: {}", getQueueName(), e);
-                    // 出现异常时短暂休眠，避免频繁重试导致CPU占用过高
+    /**
+     * 恢复未处理消息
+     */
+    private void recoverUnprocessedMessages() {
+        // 获取未到期的未处理消息
+        List<DelayedMessage> messages = delayedMessageService.findUnprocessedMessages();
+        for (DelayedMessage message : messages) {
+            long delay = Duration.between(LocalDateTime.now(), message.getExpireTime()).getSeconds();
+            if (delay > 0) {
+                delayedQueue.offer(message.getMessageId(), delay, TimeUnit.SECONDS);
+                logger.info("恢复未处理消息，queue: {}, messageId: {}, delay: {}s",
+                        getQueueName(), message.getMessageId(), delay);
+            }
+        }
+    }
+
+    /**
+     * 检查队列中的消息（增强版）
+     */
+    private void checkQueueMessages() {
+        // 避免在关闭过程中继续检查
+        if (!isListening) {
+            return;
+        }
+
+        try {
+            // 使用带超时的poll避免阻塞
+            String messageId = blockingQueue.poll(10, TimeUnit.MILLISECONDS);
+            if (messageId != null) {
+                // 检查线程池是否已关闭
+                if (!processorExecutor.getThreadPoolExecutor().isShutdown()) {
+                    // 提交到处理线程池
+                    processorExecutor.submit(new MessageProcessorTask(messageId));
+                } else {
+                    logger.warn("处理线程池已关闭，丢弃消息: {}", messageId);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.info("检查队列消息被中断, queue: {}", getQueueName());
+        } catch (Exception e) {
+            logger.error("检查队列消息异常, queue: {}", getQueueName(), e);
+        }
+    }
+
+    /**
+     * 消息处理任务
+     */
+    private class MessageProcessorTask implements Runnable {
+        private final String messageId;
+
+        public MessageProcessorTask(String messageId) {
+            this.messageId = messageId;
+        }
+
+        @Override
+        public void run() {
+            // 使用更安全的锁命名方式
+            String lockName = String.format("delayed_queue_processor_lock:%s:%s", getQueueName(), messageId);
+            RLock lock = redissonClient.getLock(lockName);
+            boolean acquired = false;
+
+            try {
+                // 调整锁超时时间，避免长时间占用
+                acquired = lock.tryLock(lockWaitTimeoutSeconds, lockLeaseTimeoutSeconds, TimeUnit.SECONDS);
+                if (acquired) {
+                    processMessage(messageId);
+                } else {
+                    logger.warn("获取分布式锁超时, queue: {}, messageId: {}", getQueueName(), messageId);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("获取分布式锁被中断, queue: {}, messageId: {}", getQueueName(), messageId);
+            } catch (Exception e) {
+                logger.error("获取分布式锁异常, queue: {}, messageId: {}", getQueueName(), messageId, e);
+            } finally {
+                if (acquired && lock.isHeldByCurrentThread()) {
                     try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
+                        lock.unlock();
+                    } catch (Exception e) {
+                        logger.warn("释放分布式锁异常, queue: {}, messageId: {}", getQueueName(), messageId, e);
                     }
                 }
             }
-        });
-        processorThread.setDaemon(true);
-        processorThread.setName("DelayedMessageProcessor-" + getQueueName());
-        processorThread.start();
+        }
     }
+
+
+    public String addDelayedMessage(String content, @NonNull LocalDateTime expireTime, String topic) {
+        LocalDateTime now = LocalDateTime.now();
+        if (expireTime.compareTo(now) < 0) {
+            logger.warn("消息已过期, queue: {}, expireTime: {}", queue, topic);
+            return null;
+        }
+        String messageId = idManager.getId();
+
+        long delay = Duration.between(now, expireTime).getSeconds();
+
+        // 创建消息实体
+        DelayedMessage message = new DelayedMessage(messageId, content, expireTime, topic);
+        message.setStatus(0);
+        // 保存到数据库
+        delayedMessageService.save(message);
+
+        if (expireTime.compareTo(now) == 0) {
+            logger.warn("消息到期，立即触发, queue: {}, expireTime: {}", queue, topic);
+            processMessage(messageId);
+        } else {
+            // 添加到延时队列
+            delayedQueue.offer(messageId, delay, TimeUnit.SECONDS);
+            logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}", getQueueName(), messageId, delay, TimeUnit.SECONDS);
+        }
+        return messageId;
+    }
+
 
     /**
      * 添加延时消息
@@ -112,7 +234,7 @@ public abstract class AbstractDelayedQueueService {
      * @return 消息ID
      */
     public String addDelayedMessage(String content, long delay, TimeUnit unit, String topic) {
-        String messageId = UUID.randomUUID().toString();
+        String messageId = idManager.getId();
         LocalDateTime processTime = LocalDateTime.now().plusSeconds(unit.toSeconds(delay));
 
         // 创建消息实体
@@ -128,6 +250,34 @@ public abstract class AbstractDelayedQueueService {
                 getQueueName(), messageId, delay, unit);
         return messageId;
     }
+
+
+    /**
+     * 批量添加延时消息
+     */
+    public List<String> addBatchDelayedMessages(List<DelayedMessage> messages, long delay, TimeUnit unit) {
+        List<String> messageIds = new ArrayList<>();
+        RBatch batch = redissonClient.createBatch();
+
+        for (DelayedMessage msgInfo : messages) {
+            String messageId = idManager.getId();
+            LocalDateTime processTime = LocalDateTime.now().plusSeconds(unit.toSeconds(delay));
+
+            // 批量保存到数据库
+            DelayedMessage message = new DelayedMessage(messageId, msgInfo.getContent(), processTime, msgInfo.getTopic());
+            message.setStatus(0);
+            delayedMessageService.save(message);
+
+            // 批量添加到延时队列
+            delayedQueue.offerAsync(messageId, delay, unit);
+            messageIds.add(messageId);
+        }
+
+        batch.execute();
+        logger.info("批量添加延时消息成功，queue: {}, count: {}", getQueueName(), messages.size());
+        return messageIds;
+    }
+
 
     /**
      * 处理消息
@@ -170,22 +320,6 @@ public abstract class AbstractDelayedQueueService {
     }
 
     /**
-     * 恢复未处理消息
-     */
-    private void recoverUnprocessedMessages() {
-        // 获取未到期的未处理消息
-        List<DelayedMessage> messages = delayedMessageService.findUnprocessedMessages();
-        for (DelayedMessage message : messages) {
-            long delay = Duration.between(LocalDateTime.now(), message.getProcessTime()).getSeconds();
-            if (delay > 0) {
-                delayedQueue.offer(message.getMessageId(), delay, TimeUnit.SECONDS);
-                logger.info("恢复未处理消息，queue: {}, messageId: {}, delay: {}s",
-                        getQueueName(), message.getMessageId(), delay);
-            }
-        }
-    }
-
-    /**
      * 处理积压消息（服务启动时调用）
      */
     private void processBacklogMessages() {
@@ -195,6 +329,17 @@ public abstract class AbstractDelayedQueueService {
             queue.offer(message.getMessageId());
             logger.info("处理积压消息，queue: {}, messageId: {}", getQueueName(), message.getMessageId());
         }
+    }
+
+    @PreDestroy
+    public void destroy() {
+        // 取消定时任务
+        if (listenerTaskFuture != null && !listenerTaskFuture.isCancelled()) {
+            listenerTaskFuture.cancel(false);
+        }
+
+        isListening = false;
+        logger.info("销毁队列监听器: {}", getQueueName());
     }
 
     // 提供获取队列实例的方法，供子类使用
@@ -216,5 +361,27 @@ public abstract class AbstractDelayedQueueService {
 
     protected DelayedMessageService getRepository() {
         return delayedMessageService;
+    }
+
+    /**
+     * 检查服务健康状态
+     */
+    public boolean isHealthy() {
+        return isListening &&
+                !processorExecutor.getThreadPoolExecutor().isShutdown() &&
+                !processorExecutor.getThreadPoolExecutor().isTerminated();
+    }
+
+    /**
+     * 获取队列统计信息
+     */
+    public Map<String, Object> getQueueStats() {
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("queueName", getQueueName());
+        stats.put("isListening", isListening);
+        stats.put("processorActiveCount", processorExecutor.getActiveCount());
+        stats.put("processorQueueSize", processorExecutor.getThreadPoolExecutor().getQueue().size());
+        stats.put("blockingQueueSize", blockingQueue.size());
+        return stats;
     }
 }

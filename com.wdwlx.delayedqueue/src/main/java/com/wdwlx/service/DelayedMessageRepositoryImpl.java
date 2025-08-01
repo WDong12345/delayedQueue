@@ -44,7 +44,9 @@ public class DelayedMessageRepositoryImpl extends ServiceImpl<DelayedMessageRepo
         baseMapper.update(
                 new LambdaUpdateWrapper<DelayedMessage>()
                         .eq(DelayedMessage::getMessageId, messageId)
-                        .set(DelayedMessage::getStatus, status));
+                        .set(DelayedMessage::getStatus, status)
+                        .set(DelayedMessage::getProcessTime, LocalDateTime.now()))
+        ;
         return true;
     }
 

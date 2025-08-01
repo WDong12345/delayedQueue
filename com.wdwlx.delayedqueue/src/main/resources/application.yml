@@ -4,6 +4,8 @@ server:
   port: 8080
   shutdown: graceful
 spring:
+  application:
+    name: delayed-queue
   #  profiles:
   #    active: test
   jackson:
@@ -40,3 +42,21 @@ mybatis-plus:
       logic-not-delete-value: 0
   executor-type: BATCH
 
+delayed:
+  queue:
+    processor:
+      thread:
+        pool:
+          size: 10
+          max:
+            size: 20
+        keepalive:
+          seconds: 60
+        queue:
+          capacity: 1000
+    listener:
+      thread:
+        pool:
+          size: 5
+        check:
+          interval: 100
