@@ -1,5 +1,6 @@
 package com.wdwlx.service;
 
+import cn.hutool.core.collection.CollUtil;
 import com.wdwlx.entity.DelayedMessage;
 import com.wdwlx.util.IdManager;
 import jakarta.annotation.PostConstruct;
@@ -67,6 +68,10 @@ public abstract class AbstractDelayedQueueService {
 
     // 抽象方法，由子类定义是否需要处理积压消息
     protected abstract boolean shouldProcessBacklogMessages();
+
+    // 抽象方法，由子类定义是否需要重复消息
+    protected abstract boolean shouldRepeatedMessage();
+
 
     @PostConstruct
     public void init() {
@@ -201,7 +206,16 @@ public abstract class AbstractDelayedQueueService {
 
     }
 
-    public String addDelayedMessage(String content, @NonNull LocalDateTime expireTime, String topic) {
+    public String addDelayedMessage(String content, @NonNull LocalDateTime expireTime, String topic, String bizId) {
+        // 不允许重复消息，则过滤数据
+        if (!shouldRepeatedMessage()) {
+            List list = delayedMessageService.findByBizId(bizId,topic);
+            if (CollUtil.isNotEmpty(list)) {
+                logger.warn("消息已存在，bizId: {}", bizId);
+                return null;
+            }
+        }
+
         LocalDateTime now = LocalDateTime.now();
         if (expireTime.isBefore(now)) {
             logger.warn("消息已过期, queue: {}, expireTime: {}", queue, topic);
@@ -212,7 +226,7 @@ public abstract class AbstractDelayedQueueService {
         long delay = Duration.between(now, expireTime).getSeconds();
 
         // 创建消息实体
-        DelayedMessage message = new DelayedMessage(messageId, content, expireTime, topic);
+        DelayedMessage message = new DelayedMessage(messageId, content, expireTime, topic, bizId);
         message.setStatus(0);
         // 保存到数据库
         delayedMessageService.save(message);
@@ -256,67 +270,6 @@ public abstract class AbstractDelayedQueueService {
     }
 
     /**
-     * 添加延时消息
-     *
-     * @param content 消息内容
-     * @param delay   延时时间
-     * @param unit    时间单位
-     * @param topic   消息主题
-     * @return 消息ID
-     */
-    public String addDelayedMessage(String content, long delay, TimeUnit unit, String topic) {
-        String messageId = idManager.getId();
-        LocalDateTime processTime = LocalDateTime.now().plusSeconds(unit.toSeconds(delay));
-
-        // 创建消息实体
-        DelayedMessage message = new DelayedMessage(messageId, content, processTime, topic);
-        message.setStatus(0);
-
-        boolean saved = false;
-        boolean queueAdded = false;
-        int retryCount = 3;
-
-        try {
-            // 保存到数据库
-            delayedMessageService.save(message);
-            saved = true;
-
-            // 添加重试机制添加到延时队列
-            while (retryCount > 0 && !queueAdded) {
-                try {
-                    // 添加到延时队列
-                    delayedQueue.offer(messageId, delay, unit);
-                    queueAdded = true;
-                    logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}", getQueueName(), messageId, delay, unit);
-                } catch (Exception e) {
-                    retryCount--;
-                    logger.warn("添加消息到延时队列失败，剩余重试次数: {}, messageId: {}", retryCount, messageId, e);
-                    if (retryCount == 0) {
-                        logger.error("添加消息到延时队列最终失败，messageId: {}", messageId, e);
-                        throw e;
-                    }
-
-                    try {
-                        Thread.sleep(100); // 短暂等待后重试
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-            }
-        } catch (Exception e) {
-            // 如果数据库保存成功但队列添加失败，回滚数据库操作
-            if (saved && !queueAdded) {
-                delayedMessageService.deleteByMessageId(messageId);
-                logger.error("添加消息到延时队列失败，已回滚数据库记录，messageId: {}", messageId, e);
-            }
-            return null;
-        }
-
-        return messageId;
-    }
-
-    /**
      * 处理消息
      *
      * @param messageId 消息ID
@@ -342,12 +295,19 @@ public abstract class AbstractDelayedQueueService {
         }
 
         try {
+            // 记录处理开始时间
+            long processStartTime = System.currentTimeMillis();
+
             // 执行业务逻辑
             handleMessage(message);
 
+            // 记录处理结束时间
+            long processEndTime = System.currentTimeMillis();
+
             // 更新消息状态为已处理
             delayedMessageService.updateStatus(messageId, 1);
-            logger.info("处理延时消息成功，queue: {}, messageId: {}", getQueueName(), messageId);
+            logger.info("处理延时消息成功，queue: {}, messageId: {}, 处理耗时: {}ms",
+                    getQueueName(), messageId, (processEndTime - processStartTime));
         } catch (Exception e) {
             // 处理失败，恢复状态为未处理，便于重试
             delayedMessageService.updateStatus(messageId, 0);

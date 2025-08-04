@@ -21,7 +21,12 @@ public class OrderDelayedQueueService extends AbstractDelayedQueueService {
         // 模拟业务处理时间
         Thread.sleep(100);
     }
-    
+
+    @Override
+    protected boolean shouldRepeatedMessage() {
+        return true;
+    }
+
     @Override
     protected boolean shouldProcessBacklogMessages() {
         return true;

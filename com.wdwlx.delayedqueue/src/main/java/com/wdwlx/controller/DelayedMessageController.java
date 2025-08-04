@@ -1,10 +1,7 @@
 package com.wdwlx.controller;
 
 import cn.hutool.extra.spring.SpringUtil;
-import com.wdwlx.service.AbstractDelayedQueueService;
-import com.wdwlx.service.NotificationDelayedQueueService;
-import com.wdwlx.service.OrderDelayedQueueService;
-import com.wdwlx.service.TaskDelayedQueueService;
+import com.wdwlx.service.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
@@ -24,31 +21,35 @@ public class DelayedMessageController {
 
     @Autowired
     private TaskDelayedQueueService taskDelayedQueueService;
+    @Autowired
+    private EmailDelayedQueueService emailDelayedQueueService;
 
     @PostMapping("/add")
-    public String sendOrderDelayedMessage(@RequestParam String content, @RequestParam String topic, @RequestParam String expireTimeStr) {
+    public String sendOrderDelayedMessage(@RequestParam String content, @RequestParam String topic, @RequestParam String expireTimeStr, @RequestParam String bizId) {
 
         LocalDateTime expireTime = LocalDateTime.parse(expireTimeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         if (Objects.equals(topic, "order")) {
-            return orderDelayedQueueService.addDelayedMessage(content, expireTime, topic);
+            return orderDelayedQueueService.addDelayedMessage(content, expireTime, topic, bizId);
         }
         if (Objects.equals(topic, "task")) {
-            return taskDelayedQueueService.addDelayedMessage(content, expireTime, topic);
+            return taskDelayedQueueService.addDelayedMessage(content, expireTime, topic, bizId);
         }
         if (Objects.equals(topic, "notification")) {
-            return notificationDelayedQueueService.addDelayedMessage(content, expireTime, topic);
+            return notificationDelayedQueueService.addDelayedMessage(content, expireTime, topic, bizId);
         }
         return "   异常";
     }
 
     @PostMapping("/addBatch")
-    public String sendOrderDelayedMessageBatch() {
-        LocalDateTime now = LocalDateTime.now();
-        for (int i = 0; i < 10; i++) {
+    public String sendOrderDelayedMessageBatch(@RequestParam String expireTimeStr) {
+        LocalDateTime now = LocalDateTime.parse(expireTimeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+
+        for (int i = 0; i < 2; i++) {
             LocalDateTime expireTime = now.plusSeconds(i);
-            orderDelayedQueueService.addDelayedMessage("order" + i, expireTime, "order");
-            taskDelayedQueueService.addDelayedMessage("task" + i, expireTime, "task");
-            notificationDelayedQueueService.addDelayedMessage("notification" + i, expireTime, "notification");
+            orderDelayedQueueService.addDelayedMessage("order" + i, expireTime, "order", "biz" + i);
+            taskDelayedQueueService.addDelayedMessage("task" + i, expireTime, "task", "biz" + i);
+            notificationDelayedQueueService.addDelayedMessage("notification" + i, expireTime, "notification", "biz" + i);
+            emailDelayedQueueService.addDelayedMessage("email" + i, expireTime, "email", "biz" + i);
         }
         return "";
 

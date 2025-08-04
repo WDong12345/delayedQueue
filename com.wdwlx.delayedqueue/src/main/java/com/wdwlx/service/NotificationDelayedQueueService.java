@@ -12,6 +12,11 @@ public class NotificationDelayedQueueService extends AbstractDelayedQueueService
     }
 
     @Override
+    protected boolean shouldRepeatedMessage() {
+        return false;
+    }
+
+    @Override
     protected void handleMessage(DelayedMessage message) throws Exception {
         // 实现通知相关的延时处理逻辑
         System.out.println("---------发送延时通知---------: " + message.getContent());

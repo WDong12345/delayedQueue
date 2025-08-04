@@ -13,6 +13,11 @@ public class EmailDelayedQueueService extends AbstractDelayedQueueService {
     }
 
     @Override
+    protected boolean shouldRepeatedMessage() {
+        return false;
+    }
+
+    @Override
     protected void handleMessage(DelayedMessage message) throws Exception {
         // 实现邮件发送逻辑
         System.out.println("---------发送邮件---------: " + message.getContent());

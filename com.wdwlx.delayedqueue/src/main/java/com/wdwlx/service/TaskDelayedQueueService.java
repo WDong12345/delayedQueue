@@ -10,7 +10,12 @@ public class TaskDelayedQueueService extends AbstractDelayedQueueService {
     protected String getQueueName() {
         return "task_delayed_queue";
     }
-    
+
+    @Override
+    protected boolean shouldRepeatedMessage() {
+        return false;
+    }
+
     @Override
     protected void handleMessage(DelayedMessage message) throws Exception {
         // 实现任务相关的延时处理逻辑

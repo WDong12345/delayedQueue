@@ -15,13 +15,18 @@ public class DelayedMessageRepositoryImpl extends ServiceImpl<DelayedMessageRepo
 
     private final DelayedMessageRepository delayedMessageRepository;
 
+    @Override
+    public List findByBizId(String bizId, String topic) {
+        return delayedMessageRepository.selectList(
+                new LambdaQueryWrapper<DelayedMessage>()
+                .eq(DelayedMessage::getBizId, bizId)
+                .eq(DelayedMessage::getTopic, topic));
+    }
 
     @Override
     public boolean deleteByMessageId(String messageId) {
 
-        int delete = delayedMessageRepository.delete(
-                new LambdaUpdateWrapper<DelayedMessage>().eq(DelayedMessage::getMessageId, messageId)
-        );
+        int delete = delayedMessageRepository.delete(new LambdaUpdateWrapper<DelayedMessage>().eq(DelayedMessage::getMessageId, messageId));
         return delete > 0;
     }
 
@@ -39,26 +44,20 @@ public class DelayedMessageRepositoryImpl extends ServiceImpl<DelayedMessageRepo
         if (messageId == null) {
             return null;
         }
-        return baseMapper.selectOne(new LambdaQueryWrapper<DelayedMessage>()
-                .eq(DelayedMessage::getMessageId, messageId)
+        return baseMapper.selectOne(new LambdaQueryWrapper<DelayedMessage>().eq(DelayedMessage::getMessageId, messageId)
                 .last(" limit 1 "));
     }
 
     @Override
     public List<DelayedMessage> findUnprocessedMessages() {
-        return delayedMessageRepository.selectList(
-                new LambdaQueryWrapper<DelayedMessage>().eq(DelayedMessage::getStatus, 0)
-        );
+        return delayedMessageRepository.selectList(new LambdaQueryWrapper<DelayedMessage>().eq(DelayedMessage::getStatus, 0));
     }
 
     @Override
     public boolean updateStatus(String messageId, int status) {
-        baseMapper.update(
-                new LambdaUpdateWrapper<DelayedMessage>()
-                        .eq(DelayedMessage::getMessageId, messageId)
-                        .set(DelayedMessage::getStatus, status)
-                        .set(DelayedMessage::getProcessTime, LocalDateTime.now()))
-        ;
+        baseMapper.update(new LambdaUpdateWrapper<DelayedMessage>().eq(DelayedMessage::getMessageId, messageId)
+                .set(DelayedMessage::getStatus, status)
+                .set(DelayedMessage::getProcessTime, LocalDateTime.now()));
         return true;
     }
 

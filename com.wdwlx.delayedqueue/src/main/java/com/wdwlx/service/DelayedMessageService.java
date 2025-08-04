@@ -17,4 +17,6 @@ public interface DelayedMessageService extends IService<DelayedMessage> {
     List<DelayedMessage> findPendingMessages(LocalDateTime beforeTime);
 
     boolean deleteByMessageId(String messageId);
+
+    List findByBizId(String bizId, String topic);
 }
