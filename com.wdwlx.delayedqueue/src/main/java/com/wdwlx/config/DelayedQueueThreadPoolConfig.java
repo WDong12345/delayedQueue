@@ -20,14 +20,14 @@ public class DelayedQueueThreadPoolConfig {
     @Value("${delayed.queue.processor.thread.pool.max-size:20}")
     private int processorMaxPoolSize;
 
-    @Value("${delayed.queue.processor.thread.keepalive-seconds:60}")
+    @Value("${delayed.queue.processor.thread.keepalive.seconds:60}")
     private int processorKeepAliveSeconds;
 
-    @Value("${delayed.queue.processor.thread.queue-capacity:1000}")
+    @Value("${delayed.queue.processor.thread.queue.capacity:1000}")
     private int processorQueueCapacity;
 
     // 监听线程池配置
-    @Value("${delayed.queue.listener.thread.pool-size:5}")
+    @Value("${delayed.queue.listener.thread.pool.core-size:4}")
     private int listenerThreadPoolSize;
 
     @Bean("delayedQueueProcessorExecutor")

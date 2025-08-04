@@ -34,7 +34,7 @@ mybatis-plus:
   configuration:
     use-generated-keys: true
     cache-enabled: false
-#    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  #    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
   global-config:
     db-config:
       id-type: auto
@@ -44,12 +44,16 @@ mybatis-plus:
 
 delayed:
   queue:
+    lock:
+      # 等待锁超时时间
+      wait-timeout-seconds: 5
+      # 租约时间设置为足够长，或者使用看门狗机制(-1)
+      lease-timeout-seconds: -1
     processor:
       thread:
         pool:
-          size: 10
-          max:
-            size: 20
+          core-size: 10
+          max-size: 20
         keepalive:
           seconds: 60
         queue:
@@ -57,6 +61,4 @@ delayed:
     listener:
       thread:
         pool:
-          size: 5
-        check:
-          interval: 100
+          core-size: 5
