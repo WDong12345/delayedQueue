@@ -74,8 +74,9 @@ public abstract class AbstractDelayedQueueService {
         String queueName = getQueueName();
         logger.info("初始化队列：{}", queueName);
         queue = redissonClient.getQueue(queueName);
-        delayedQueue = redissonClient.getDelayedQueue(queue);
         blockingQueue = redissonClient.getBlockingQueue(queueName);
+        // 将普通队列绑定为延迟队列
+        delayedQueue = redissonClient.getDelayedQueue(queue);
 
         // 启动消息监听器
         startMessageListener();
@@ -114,11 +115,20 @@ public abstract class AbstractDelayedQueueService {
         // 获取未到期的未处理消息
         List<DelayedMessage> messages = delayedMessageService.findUnprocessedMessages();
         for (DelayedMessage message : messages) {
-            long delay = Duration.between(LocalDateTime.now(), message.getExpireTime()).getSeconds();
-            if (delay > 0) {
-                delayedQueue.offer(message.getMessageId(), delay, TimeUnit.SECONDS);
-                logger.info("恢复未处理消息，queue: {}, messageId: {}, delay: {}s",
-                        getQueueName(), message.getMessageId(), delay);
+            // 检查消息是否已经存在于队列中
+            if (!queue.contains(message.getMessageId()) && !delayedQueue.contains(message.getMessageId())) {
+                long delay = Duration.between(LocalDateTime.now(), message.getExpireTime()).getSeconds();
+                if (delay > 0) {
+                    delayedQueue.offer(message.getMessageId(), delay, TimeUnit.SECONDS);
+                    logger.info("恢复未处理消息，queue: {}, messageId: {}, delay: {}s",
+                            getQueueName(), message.getMessageId(), delay);
+                } else {
+                    // 如果已经过期，直接放入普通队列立即处理
+                    queue.offer(message.getMessageId());
+                    logger.info("恢复已过期消息，立即处理，queue: {}, messageId: {}", getQueueName(), message.getMessageId());
+                }
+            } else {
+                logger.info("消息已存在于队列中，跳过恢复: {}", message.getMessageId());
             }
         }
     }
@@ -194,7 +204,6 @@ public abstract class AbstractDelayedQueueService {
         }
     }
 
-
     public String addDelayedMessage(String content, @NonNull LocalDateTime expireTime, String topic) {
         LocalDateTime now = LocalDateTime.now();
         if (expireTime.compareTo(now) < 0) {
@@ -211,17 +220,44 @@ public abstract class AbstractDelayedQueueService {
         // 保存到数据库
         delayedMessageService.save(message);
 
-        if (expireTime.compareTo(now) == 0) {
-            logger.warn("消息到期，立即触发, queue: {}, expireTime: {}", queue, topic);
-            processMessage(messageId);
-        } else {
-            // 添加到延时队列
-            delayedQueue.offer(messageId, delay, TimeUnit.SECONDS);
-            logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}", getQueueName(), messageId, delay, TimeUnit.SECONDS);
+        boolean queueAdded = false;
+        int retryCount = 3;
+
+        // 添加重试机制
+        while (retryCount > 0 && !queueAdded) {
+            try {
+                if (expireTime.compareTo(now) == 0) {
+                    logger.warn("消息到期，立即触发, queue: {}, expireTime: {}", queue, topic);
+                    processMessage(messageId);
+                    queueAdded = true;
+                } else {
+                    // 添加到延时队列
+                    delayedQueue.offer(messageId, delay, TimeUnit.SECONDS);
+                    queueAdded = true;
+                    logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}",
+                            getQueueName(), messageId, delay, TimeUnit.SECONDS);
+                }
+            } catch (Exception e) {
+                retryCount--;
+                logger.warn("添加消息到延时队列失败，剩余重试次数: {}, messageId: {}", retryCount, messageId, e);
+                if (retryCount == 0) {
+                    // 重试失败，回滚数据库操作
+                    delayedMessageService.deleteByMessageId(messageId);
+                    logger.error("添加消息到延时队列最终失败，已回滚数据库记录，messageId: {}", messageId, e);
+                    return null;
+                }
+
+                try {
+                    Thread.sleep(100); // 短暂等待后重试
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
+
         return messageId;
     }
-
 
     /**
      * 添加延时消息
@@ -239,14 +275,49 @@ public abstract class AbstractDelayedQueueService {
         // 创建消息实体
         DelayedMessage message = new DelayedMessage(messageId, content, processTime, topic);
         message.setStatus(0);
-        // 保存到数据库
-        delayedMessageService.save(message);
 
-        // 添加到延时队列
-        delayedQueue.offer(messageId, delay, unit);
+        boolean saved = false;
+        boolean queueAdded = false;
+        int retryCount = 3;
 
-        logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}",
-                getQueueName(), messageId, delay, unit);
+        try {
+            // 保存到数据库
+            delayedMessageService.save(message);
+            saved = true;
+
+            // 添加重试机制添加到延时队列
+            while (retryCount > 0 && !queueAdded) {
+                try {
+                    // 添加到延时队列
+                    delayedQueue.offer(messageId, delay, unit);
+                    queueAdded = true;
+                    logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}",
+                            getQueueName(), messageId, delay, unit);
+                } catch (Exception e) {
+                    retryCount--;
+                    logger.warn("添加消息到延时队列失败，剩余重试次数: {}, messageId: {}", retryCount, messageId, e);
+                    if (retryCount == 0) {
+                        logger.error("添加消息到延时队列最终失败，messageId: {}", messageId, e);
+                        throw e;
+                    }
+
+                    try {
+                        Thread.sleep(100); // 短暂等待后重试
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // 如果数据库保存成功但队列添加失败，回滚数据库操作
+            if (saved && !queueAdded) {
+                delayedMessageService.deleteByMessageId(messageId);
+                logger.error("添加消息到延时队列失败，已回滚数据库记录，messageId: {}", messageId, e);
+            }
+            return null;
+        }
+
         return messageId;
     }
 
@@ -264,9 +335,18 @@ public abstract class AbstractDelayedQueueService {
         }
 
         // 检查消息状态，避免重复处理
-        if (message.getStatus() != 0) {
+        if (message.getStatus() == 1) {
             logger.info("消息已处理，queue: {}, messageId: {}, status: {}",
                     getQueueName(), messageId, message.getStatus());
+            return;
+        }
+
+        // 检查消息是否已过期
+        if (message.getExpireTime().isBefore(LocalDateTime.now())) {
+            logger.warn("消息已过期，queue: {}, messageId: {}, expireTime: {}",
+                    getQueueName(), messageId, message.getExpireTime());
+            // 可以选择更新状态为已过期
+            delayedMessageService.updateStatus(messageId, 3); // 3表示已过期
             return;
         }
 
@@ -296,9 +376,13 @@ public abstract class AbstractDelayedQueueService {
     private void processBacklogMessages() {
         List<DelayedMessage> messages = delayedMessageService.findPendingMessages(LocalDateTime.now());
         for (DelayedMessage message : messages) {
-            // 直接放入队列立即处理
-            queue.offer(message.getMessageId());
-            logger.info("处理积压消息，queue: {}, messageId: {}", getQueueName(), message.getMessageId());
+            // 检查消息是否已存在于队列中，避免重复添加
+            if (!queue.contains(message.getMessageId()) && !delayedQueue.contains(message.getMessageId())) {
+                queue.offer(message.getMessageId());
+                logger.info("处理积压消息，queue: {}, messageId: {}", getQueueName(), message.getMessageId());
+            } else {
+                logger.info("积压消息已存在于队列中，跳过: {}", message.getMessageId());
+            }
         }
     }
 
@@ -353,6 +437,7 @@ public abstract class AbstractDelayedQueueService {
         stats.put("processorActiveCount", processorExecutor.getActiveCount());
         stats.put("processorQueueSize", processorExecutor.getThreadPoolExecutor().getQueue().size());
         stats.put("blockingQueueSize", blockingQueue.size());
+        stats.put("delayedQueueSize", delayedQueue.size());
         return stats;
     }
 }
