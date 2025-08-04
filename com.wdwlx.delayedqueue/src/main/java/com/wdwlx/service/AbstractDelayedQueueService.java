@@ -97,12 +97,8 @@ public abstract class AbstractDelayedQueueService {
         String queueName = getQueueName();
 
         // 提交周期性任务到共享监听线程池并保存Future
-        listenerTaskFuture = listenerExecutor.scheduleWithFixedDelay(
-                this::checkQueueMessages,
-                0,
-                100, // 固定100毫秒检查间隔
-                TimeUnit.MILLISECONDS
-        );
+        listenerTaskFuture = listenerExecutor.scheduleWithFixedDelay(this::checkQueueMessages, 0, 100, // 固定100毫秒检查间隔
+                TimeUnit.MILLISECONDS);
 
         isListening = true;
         logger.info("注册队列监听器: {}", queueName);
@@ -120,8 +116,7 @@ public abstract class AbstractDelayedQueueService {
                 long delay = Duration.between(LocalDateTime.now(), message.getExpireTime()).getSeconds();
                 if (delay > 0) {
                     delayedQueue.offer(message.getMessageId(), delay, TimeUnit.SECONDS);
-                    logger.info("恢复未处理消息，queue: {}, messageId: {}, delay: {}s",
-                            getQueueName(), message.getMessageId(), delay);
+                    logger.info("恢复未处理消息，queue: {}, messageId: {}, delay: {}s", getQueueName(), message.getMessageId(), delay);
                 } else {
                     // 如果已经过期，直接放入普通队列立即处理
                     queue.offer(message.getMessageId());
@@ -174,14 +169,13 @@ public abstract class AbstractDelayedQueueService {
 
         @Override
         public void run() {
-            // 使用更安全的锁命名方式
             String lockName = String.format("delayed_queue_processor_lock:%s:%s", getQueueName(), messageId);
             RLock lock = redissonClient.getLock(lockName);
             boolean acquired = false;
 
             try {
-                // 调整锁超时时间，避免长时间占用
-                acquired = lock.tryLock(lockWaitTimeoutSeconds, lockLeaseTimeoutSeconds, TimeUnit.SECONDS);
+                // 使用看门狗机制：不设置租约时间（传-1），Redisson会自动续期
+                acquired = lock.tryLock(lockWaitTimeoutSeconds, -1, TimeUnit.SECONDS);
                 if (acquired) {
                     processMessage(messageId);
                 } else {
@@ -193,6 +187,7 @@ public abstract class AbstractDelayedQueueService {
             } catch (Exception e) {
                 logger.error("获取分布式锁异常, queue: {}, messageId: {}", getQueueName(), messageId, e);
             } finally {
+                // 确保只有持有锁的线程才能释放锁
                 if (acquired && lock.isHeldByCurrentThread()) {
                     try {
                         lock.unlock();
@@ -202,11 +197,13 @@ public abstract class AbstractDelayedQueueService {
                 }
             }
         }
+
+
     }
 
     public String addDelayedMessage(String content, @NonNull LocalDateTime expireTime, String topic) {
         LocalDateTime now = LocalDateTime.now();
-        if (expireTime.compareTo(now) < 0) {
+        if (expireTime.isBefore(now)) {
             logger.warn("消息已过期, queue: {}, expireTime: {}", queue, topic);
             return null;
         }
@@ -226,7 +223,7 @@ public abstract class AbstractDelayedQueueService {
         // 添加重试机制
         while (retryCount > 0 && !queueAdded) {
             try {
-                if (expireTime.compareTo(now) == 0) {
+                if (expireTime.isEqual(now)) {
                     logger.warn("消息到期，立即触发, queue: {}, expireTime: {}", queue, topic);
                     processMessage(messageId);
                     queueAdded = true;
@@ -234,8 +231,7 @@ public abstract class AbstractDelayedQueueService {
                     // 添加到延时队列
                     delayedQueue.offer(messageId, delay, TimeUnit.SECONDS);
                     queueAdded = true;
-                    logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}",
-                            getQueueName(), messageId, delay, TimeUnit.SECONDS);
+                    logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}", getQueueName(), messageId, delay, TimeUnit.SECONDS);
                 }
             } catch (Exception e) {
                 retryCount--;
@@ -291,8 +287,7 @@ public abstract class AbstractDelayedQueueService {
                     // 添加到延时队列
                     delayedQueue.offer(messageId, delay, unit);
                     queueAdded = true;
-                    logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}",
-                            getQueueName(), messageId, delay, unit);
+                    logger.info("添加延时消息成功，queue: {}, messageId: {}, delay: {} {}", getQueueName(), messageId, delay, unit);
                 } catch (Exception e) {
                     retryCount--;
                     logger.warn("添加消息到延时队列失败，剩余重试次数: {}, messageId: {}", retryCount, messageId, e);
@@ -336,17 +331,7 @@ public abstract class AbstractDelayedQueueService {
 
         // 检查消息状态，避免重复处理
         if (message.getStatus() == 1) {
-            logger.info("消息已处理，queue: {}, messageId: {}, status: {}",
-                    getQueueName(), messageId, message.getStatus());
-            return;
-        }
-
-        // 检查消息是否已过期
-        if (message.getExpireTime().isBefore(LocalDateTime.now())) {
-            logger.warn("消息已过期，queue: {}, messageId: {}, expireTime: {}",
-                    getQueueName(), messageId, message.getExpireTime());
-            // 可以选择更新状态为已过期
-            delayedMessageService.updateStatus(messageId, 3); // 3表示已过期
+            logger.info("消息已处理，queue: {}, messageId: {}, status: {}", getQueueName(), messageId, message.getStatus());
             return;
         }
 
@@ -397,26 +382,6 @@ public abstract class AbstractDelayedQueueService {
         logger.info("销毁队列监听器: {}", getQueueName());
     }
 
-    // 提供获取队列实例的方法，供子类使用
-    protected RDelayedQueue<String> getDelayedQueue() {
-        return delayedQueue;
-    }
-
-    protected RQueue<String> getQueue() {
-        return queue;
-    }
-
-    protected RBlockingQueue<String> getBlockingQueue() {
-        return blockingQueue;
-    }
-
-    protected RedissonClient getRedissonClient() {
-        return redissonClient;
-    }
-
-    protected DelayedMessageService getRepository() {
-        return delayedMessageService;
-    }
 
     /**
      * 检查服务健康状态
