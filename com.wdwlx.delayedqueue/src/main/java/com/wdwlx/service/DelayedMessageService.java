@@ -15,4 +15,6 @@ public interface DelayedMessageService extends IService<DelayedMessage> {
     boolean updateStatus(String messageId, int status);
 
     List<DelayedMessage> findPendingMessages(LocalDateTime beforeTime);
+
+    boolean deleteByMessageId(String messageId);
 }

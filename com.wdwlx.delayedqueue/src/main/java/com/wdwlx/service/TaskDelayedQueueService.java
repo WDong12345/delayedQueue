@@ -1,4 +1,3 @@
-// #file:F:\工作目录\java_wp\com.wdwlx.delayedqueue\src\main\java\com\wdwlx\service\TaskDelayedQueueService.java
 package com.wdwlx.service;
 
 import com.wdwlx.entity.DelayedMessage;
@@ -20,7 +19,7 @@ public class TaskDelayedQueueService extends AbstractDelayedQueueService {
         // 这里可以调用任务服务的相关方法
         
         // 模拟业务处理时间
-        Thread.sleep(200);
+//         Thread.sleep(200);
     }
     
     @Override

@@ -15,6 +15,16 @@ public class DelayedMessageRepositoryImpl extends ServiceImpl<DelayedMessageRepo
 
     private final DelayedMessageRepository delayedMessageRepository;
 
+
+    @Override
+    public boolean deleteByMessageId(String messageId) {
+
+        int delete = delayedMessageRepository.delete(
+                new LambdaUpdateWrapper<DelayedMessage>().eq(DelayedMessage::getMessageId, messageId)
+        );
+        return delete > 0;
+    }
+
     public DelayedMessageRepositoryImpl(DelayedMessageRepository delayedMessageRepository) {
         this.delayedMessageRepository = delayedMessageRepository;
     }
@@ -36,7 +46,9 @@ public class DelayedMessageRepositoryImpl extends ServiceImpl<DelayedMessageRepo
 
     @Override
     public List<DelayedMessage> findUnprocessedMessages() {
-        return delayedMessageRepository.selectList(new LambdaQueryWrapper<DelayedMessage>());
+        return delayedMessageRepository.selectList(
+                new LambdaQueryWrapper<DelayedMessage>().eq(DelayedMessage::getStatus, 0)
+        );
     }
 
     @Override

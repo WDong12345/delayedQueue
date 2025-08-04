@@ -1,4 +1,3 @@
-// #file:F:\工作目录\java_wp\com.wdwlx.delayedqueue\src\main\java\com\wdwlx\service\OrderDelayedQueueService.java
 package com.wdwlx.service;
 
 import com.wdwlx.entity.DelayedMessage;
