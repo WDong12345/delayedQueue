@@ -1,9 +1,11 @@
 package com.wdwlx.service;
 
 import com.wdwlx.entity.DelayedMessage;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 @Service
+@Slf4j
 public class OrderDelayedQueueService extends AbstractDelayedQueueService {
 
     @Override
@@ -25,7 +27,7 @@ public class OrderDelayedQueueService extends AbstractDelayedQueueService {
     @Override
     protected void handleMessage(DelayedMessage message) throws Exception {
         // 实现订单相关的延时处理逻辑
-        System.out.println("---------处理订单延时消息---------: " + message.getContent());
+        log.info("---------处理订单延时消息---------: " + message.getContent());
         // 例如：自动取消超时未支付订单、自动确认收货等
         // 这里可以调用订单服务的相关方法
 

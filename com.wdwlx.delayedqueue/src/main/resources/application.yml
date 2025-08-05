@@ -62,3 +62,17 @@ delayed:
       thread:
         pool:
           core-size: 5
+
+logging:
+  charset:
+    console: utf-8
+  file:
+    path: ./logs  # 日志文件存储目录
+  pattern:
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"
+  level:
+    com.wdwlx: INFO
+    org.springframework: WARN
+    org.redisson: WARN
+
