@@ -8,12 +8,23 @@ import org.springframework.stereotype.Service;
 public class EmailDelayedQueueService extends AbstractDelayedQueueService {
 
     @Override
+    protected long getCheckInterval() {
+        return 100;
+    }
+
+    @Override
+    protected long getBloomFilterSize() {
+        // 初始化bloom filter大小容量，可以根据实际情况调整
+        return 100_000;
+    }
+
+    @Override
     protected String getQueueName() {
         return "email_delayed_queue";
     }
 
     @Override
-    protected boolean shouldRepeatedMessage() {
+    protected boolean repeatedMessage() {
         return false;
     }
 

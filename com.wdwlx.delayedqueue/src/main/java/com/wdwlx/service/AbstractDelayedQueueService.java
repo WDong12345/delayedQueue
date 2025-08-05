@@ -59,6 +59,7 @@ public abstract class AbstractDelayedQueueService {
     // 添加定时任务的Future引用
     private ScheduledFuture<?> listenerTaskFuture;
     private volatile boolean isListening = false;
+    private volatile RBloomFilter<String> bloomFilter;
 
     // 抽象方法，由子类提供队列名称
     protected abstract String getQueueName();
@@ -70,8 +71,11 @@ public abstract class AbstractDelayedQueueService {
     protected abstract boolean shouldProcessBacklogMessages();
 
     // 抽象方法，由子类定义是否需要重复消息
-    protected abstract boolean shouldRepeatedMessage();
+    protected abstract boolean repeatedMessage();
 
+    protected abstract long getCheckInterval();
+
+    protected abstract long getBloomFilterSize();
 
     @PostConstruct
     public void init() {
@@ -88,6 +92,18 @@ public abstract class AbstractDelayedQueueService {
 
         // 恢复未处理消息
         recoverUnprocessedMessages();
+        if (!repeatedMessage()) {
+            String bloomFilterName = "delayed_queue_bloom_filter:" + queueName;
+            bloomFilter = redissonClient.getBloomFilter(bloomFilterName);
+
+            // 根据历史数据和业务增长预估
+            long expectedInsertions = 1_000_000; // 动态预估
+            double falseProbability = 0.01; // 1%误判率
+
+            if (!bloomFilter.isExists()) {
+                bloomFilter.tryInit(expectedInsertions, falseProbability);
+            }
+        }
 
         // 处理积压消息（如果需要）
         if (shouldProcessBacklogMessages()) {
@@ -101,34 +117,34 @@ public abstract class AbstractDelayedQueueService {
     private void startMessageListener() {
         String queueName = getQueueName();
 
-        // 提交周期性任务到共享监听线程池并保存Future
-        listenerTaskFuture = listenerExecutor.scheduleWithFixedDelay(this::checkQueueMessages, 0, 100, // 固定100毫秒检查间隔
-                TimeUnit.MILLISECONDS);
+        // 根据队列重要性调整检查频率
+        long checkInterval = getCheckInterval(); // 可以由子类定义
 
+        listenerTaskFuture = listenerExecutor.scheduleWithFixedDelay(this::checkQueueMessages, 0, checkInterval, TimeUnit.MILLISECONDS);
         isListening = true;
         logger.info("注册队列监听器: {}", queueName);
     }
+
 
     /**
      * 恢复未处理消息
      */
     private void recoverUnprocessedMessages() {
-        // 获取未到期的未处理消息
         List<DelayedMessage> messages = delayedMessageService.findUnprocessedMessages();
+        LocalDateTime now = LocalDateTime.now();
+
         for (DelayedMessage message : messages) {
-            // 检查消息是否已经存在于队列中
-            if (!queue.contains(message.getMessageId()) && !delayedQueue.contains(message.getMessageId())) {
-                long delay = Duration.between(LocalDateTime.now(), message.getExpireTime()).getSeconds();
-                if (delay > 0) {
-                    delayedQueue.offer(message.getMessageId(), delay, TimeUnit.SECONDS);
-                    logger.info("恢复未处理消息，queue: {}, messageId: {}, delay: {}s", getQueueName(), message.getMessageId(), delay);
-                } else {
-                    // 如果已经过期，直接放入普通队列立即处理
+            long delay = Duration.between(now, message.getExpireTime()).getSeconds();
+            if (delay <= 0) {
+                // 过期消息直接处理
+                if (!queue.contains(message.getMessageId())) {
                     queue.offer(message.getMessageId());
                     logger.info("恢复已过期消息，立即处理，queue: {}, messageId: {}", getQueueName(), message.getMessageId());
                 }
             } else {
-                logger.info("消息已存在于队列中，跳过恢复: {}", message.getMessageId());
+                // 未过期消息添加到延时队列（即使已存在也不影响）
+                delayedQueue.offer(message.getMessageId(), delay, TimeUnit.SECONDS);
+                logger.info("恢复未处理消息，queue: {}, messageId: {}, delay: {}s", getQueueName(), message.getMessageId(), delay);
             }
         }
     }
@@ -207,16 +223,46 @@ public abstract class AbstractDelayedQueueService {
     }
 
     public String addDelayedMessage(String content, @NonNull LocalDateTime expireTime, String topic, String bizId) {
-        // 不允许重复消息，则过滤数据
-        if (!shouldRepeatedMessage()) {
-            List list = delayedMessageService.findByBizId(bizId,topic);
-            if (CollUtil.isNotEmpty(list)) {
-                logger.warn("消息已存在，bizId: {}", bizId);
-                return null;
+        LocalDateTime now = LocalDateTime.now();
+        if (expireTime.isBefore(now)) {
+            logger.warn("消息已过期, queue: {}, expireTime: {}", queue, topic);
+            return null;
+        }
+
+        String checkKey = topic + ":" + bizId;
+
+        // 不允许重复消息，使用多层检查机制
+        if (!repeatedMessage()) {
+
+            // 第一层：布隆过滤器快速过滤（极低内存占用）
+            if (bloomFilter.contains(checkKey)) {
+                // 第二层：Redis缓存精确检查（避免大部分数据库查询）
+                String cacheKey = "delayed_msg_cache:" + checkKey;
+                RBucket<String> cacheBucket = redissonClient.getBucket(cacheKey);
+                String cacheResult = cacheBucket.get();
+
+                if (cacheResult != null) {
+                    if ("EXISTS".equals(cacheResult)) {
+                        logger.warn("消息已存在（缓存命中），bizId: {}", bizId);
+                        throw new RuntimeException("消息已存在");
+                    }
+                    return cacheResult; // 返回已存在的messageId
+                }
+
+                // 第三层：数据库精确查询（最终确认）
+                List<DelayedMessage> list = delayedMessageService.findByBizId(bizId, topic);
+                if (CollUtil.isNotEmpty(list)) {
+                    // 更新缓存
+                    cacheBucket.set("EXISTS", 5, TimeUnit.MINUTES);
+                    logger.warn("消息已存在，bizId: {}", bizId);
+                    throw new RuntimeException("消息已存在");
+                }
+                // 布隆过滤器误判，清除缓存标记
+                cacheBucket.delete();
             }
         }
 
-        LocalDateTime now = LocalDateTime.now();
+
         if (expireTime.isBefore(now)) {
             logger.warn("消息已过期, queue: {}, expireTime: {}", queue, topic);
             return null;
@@ -230,7 +276,9 @@ public abstract class AbstractDelayedQueueService {
         message.setStatus(0);
         // 保存到数据库
         delayedMessageService.save(message);
-
+        if (!repeatedMessage()) {
+            bloomFilter.add(checkKey);
+        }
         boolean queueAdded = false;
         int retryCount = 3;
 
@@ -306,8 +354,7 @@ public abstract class AbstractDelayedQueueService {
 
             // 更新消息状态为已处理
             delayedMessageService.updateStatus(messageId, 1);
-            logger.info("处理延时消息成功，queue: {}, messageId: {}, 处理耗时: {}ms",
-                    getQueueName(), messageId, (processEndTime - processStartTime));
+            logger.info("处理延时消息成功，queue: {}, messageId: {}, 处理耗时: {}ms", getQueueName(), messageId, (processEndTime - processStartTime));
         } catch (Exception e) {
             // 处理失败，恢复状态为未处理，便于重试
             delayedMessageService.updateStatus(messageId, 0);
@@ -347,9 +394,8 @@ public abstract class AbstractDelayedQueueService {
      * 检查服务健康状态
      */
     public boolean isHealthy() {
-        return isListening &&
-                !processorExecutor.getThreadPoolExecutor().isShutdown() &&
-                !processorExecutor.getThreadPoolExecutor().isTerminated();
+        return isListening && !processorExecutor.getThreadPoolExecutor()
+                .isShutdown() && !processorExecutor.getThreadPoolExecutor().isTerminated();
     }
 
     /**

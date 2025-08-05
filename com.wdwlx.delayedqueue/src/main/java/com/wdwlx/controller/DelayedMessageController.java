@@ -25,7 +25,7 @@ public class DelayedMessageController {
     private EmailDelayedQueueService emailDelayedQueueService;
 
     @PostMapping("/add")
-    public String sendOrderDelayedMessage(@RequestParam String content, @RequestParam String topic, @RequestParam String expireTimeStr, @RequestParam String bizId) {
+    public Object sendOrderDelayedMessage(@RequestParam String content, @RequestParam String topic, @RequestParam String expireTimeStr, @RequestParam String bizId) {
 
         LocalDateTime expireTime = LocalDateTime.parse(expireTimeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         if (Objects.equals(topic, "order")) {

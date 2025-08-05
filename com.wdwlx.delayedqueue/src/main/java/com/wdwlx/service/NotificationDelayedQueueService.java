@@ -12,7 +12,18 @@ public class NotificationDelayedQueueService extends AbstractDelayedQueueService
     }
 
     @Override
-    protected boolean shouldRepeatedMessage() {
+    protected long getCheckInterval() {
+        return 100;
+    }
+
+    @Override
+    protected long getBloomFilterSize() {
+        // 初始化bloom filter大小容量，可以根据实际情况调整
+        return 100_000;
+    }
+
+    @Override
+    protected boolean repeatedMessage() {
         return false;
     }
 
